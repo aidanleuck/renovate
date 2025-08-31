@@ -50,6 +50,7 @@ export interface RepoParams {
   cloneSubmodulesFilter?: string[];
   ignorePrAuthor?: boolean;
   bbUseDevelopmentBranch?: boolean;
+  bbUseDefaultReviewers?: boolean;
   includeMirrors?: boolean;
 }
 
@@ -106,7 +107,6 @@ export interface PlatformPrOptions {
   gitLabIgnoreApprovals?: boolean;
   usePlatformAutomerge?: boolean;
   forkModeDisallowMaintainerEdits?: boolean;
-  automergeSkipParticipantsInitially?: boolean;
 }
 
 export interface CreatePRConfig {
@@ -296,7 +296,6 @@ export interface Platform {
   commitFiles?(config: CommitFilesConfig): Promise<LongCommitSha | null>;
   expandGroupMembers?(reviewersOrAssignees: string[]): Promise<string[]>;
   extractRulesFromCodeOwnersLines?(cleanedLines: string[]): FileOwnerRule[];
-  getDefaultReviewers?(): Promise<string[]>;
 
   maxBodyLength(): number;
   labelCharLimit?(): number;

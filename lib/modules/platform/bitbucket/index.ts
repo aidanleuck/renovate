@@ -192,6 +192,7 @@ export async function initRepo({
   cloneSubmodulesFilter,
   ignorePrAuthor,
   bbUseDevelopmentBranch,
+  bbUseDefaultReviewers,
 }: RepoParams): Promise<RepoResult> {
   logger.debug(`initRepo("${repository}")`);
   const opts = hostRules.find({
@@ -201,6 +202,7 @@ export async function initRepo({
   config = {
     repository,
     ignorePrAuthor,
+    bbUseDefaultReviewers,
   } as Config;
   let info: RepoInfo;
   let mainBranch: string;
@@ -739,10 +741,40 @@ export async function addReviewers(
 
   // TODO #22198
   const { title } = (await getPr(prId))!;
+  
+  let allReviewers = [...reviewers];
+  
+  // Add default reviewers if the config is enabled
+  if (config.bbUseDefaultReviewers) {
+    try {
+      logger.debug('Fetching default reviewers to add to PR');
+      const reviewersResponse = (
+        await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
+          `/2.0/repositories/${config.repository}/effective-default-reviewers`,
+          {
+            paginate: true,
+            cacheProvider: memCacheProvider,
+          },
+        )
+      ).body;
+      
+      const defaultReviewers = reviewersResponse.values.map((reviewer: EffectiveReviewer) =>
+        reviewer.user.uuid
+      );
+      
+      logger.debug(`Found ${defaultReviewers.length} default reviewers`);
+      
+      // Combine reviewers, avoiding duplicates
+      const reviewerSet = new Set([...allReviewers, ...defaultReviewers]);
+      allReviewers = Array.from(reviewerSet);
+    } catch (err) {
+      logger.debug({ err }, 'Failed to fetch default reviewers');
+    }
+  }
 
   const body = {
     title,
-    reviewers: reviewers.map((username: string) => {
+    reviewers: allReviewers.map((username: string) => {
       const isUUID =
         username.startsWith('{') &&
         username.endsWith('}') &&
@@ -760,32 +792,6 @@ export async function addReviewers(
       body,
     },
   );
-}
-
-export async function getDefaultReviewers(): Promise<string[]> {
-  logger.debug('Fetching default reviewers');
-  
-  try {
-    const reviewersResponse = (
-      await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
-        `/2.0/repositories/${config.repository}/effective-default-reviewers`,
-        {
-          paginate: true,
-          cacheProvider: memCacheProvider,
-        },
-      )
-    ).body;
-    
-    const reviewers = reviewersResponse.values.map((reviewer: EffectiveReviewer) =>
-      reviewer.user.uuid
-    );
-    
-    logger.debug(`Found ${reviewers.length} default reviewers`);
-    return reviewers;
-  } catch (err) {
-    logger.debug({ err }, 'Failed to fetch default reviewers');
-    return [];
-  }
 }
 
 /* v8 ignore start */
@@ -928,11 +934,7 @@ export async function createPr({
 
   let reviewers: Account[] = [];
 
-  // Only add default reviewers if not skipping participants for automerge
-  if (
-    platformPrOptions?.bbUseDefaultReviewers &&
-    !platformPrOptions?.automergeSkipParticipantsInitially
-  ) {
+  if (platformPrOptions?.bbUseDefaultReviewers) {
     const reviewersResponse = (
       await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
         `/2.0/repositories/${config.repository}/effective-default-reviewers`,

@@ -15,6 +15,7 @@ export interface Config {
   owner: string;
   repository: string;
   ignorePrAuthor: boolean;
+  bbUseDefaultReviewers?: boolean;
   is_private: boolean;
 }
 

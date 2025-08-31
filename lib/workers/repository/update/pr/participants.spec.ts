@@ -193,51 +193,5 @@ describe('workers/repository/update/pr/participants', () => {
         'baz',
       ]);
     });
-
-    it('adds Bitbucket default reviewers when automerge is enabled and assignAutomerge is false', async () => {
-      platform.getDefaultReviewers = vi.fn().mockResolvedValueOnce(['bb-user-1', 'bb-user-2']);
-      
-      await addParticipants({ 
-        ...config, 
-        bbUseDefaultReviewers: true,
-        automerge: true,
-        assignAutomerge: false
-      }, pr);
-      
-      expect(platform.getDefaultReviewers).toHaveBeenCalled();
-      expect(platform.addReviewers).toHaveBeenCalledWith(123, [
-        'x',
-        'y',
-        'z',
-        'bb-user-1',
-        'bb-user-2',
-      ]);
-    });
-
-    it('does not add Bitbucket default reviewers when automerge is disabled', async () => {
-      platform.getDefaultReviewers = vi.fn().mockResolvedValueOnce(['bb-user-1', 'bb-user-2']);
-      
-      await addParticipants({ 
-        ...config, 
-        bbUseDefaultReviewers: true,
-        automerge: false,
-      }, pr);
-      
-      expect(platform.getDefaultReviewers).not.toHaveBeenCalled();
-      expect(platform.addReviewers).toHaveBeenCalledWith(123, ['x', 'y', 'z']);
-    });
-
-    it('does not add Bitbucket default reviewers when assignAutomerge is true', async () => {
-      platform.getDefaultReviewers = vi.fn().mockResolvedValueOnce(['bb-user-1', 'bb-user-2']);
-      
-      await addParticipants({ 
-        ...config, 
-        bbUseDefaultReviewers: true,
-        automerge: true,
-        assignAutomerge: true,
-      }, pr);
-      
-      expect(platform.getDefaultReviewers).not.toHaveBeenCalled();
-      expect(platform.addReviewers).toHaveBeenCalledWith(123, ['x', 'y', 'z']);
-    });
   });
+});

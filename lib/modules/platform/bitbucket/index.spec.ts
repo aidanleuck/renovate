@@ -796,6 +796,114 @@ describe('modules/platform/bitbucket/index', () => {
         ]),
       ).toResolve();
     });
+
+    it('should add default reviewers when bbUseDefaultReviewers is enabled', async () => {
+      const scope = await initRepoMock({
+        repository: 'some/repo',
+        bbUseDefaultReviewers: true,
+      });
+      
+      scope
+        .get('/2.0/repositories/some/repo/pullrequests/5')
+        .reply(200, pr)
+        .get('/2.0/repositories/some/repo/effective-default-reviewers')
+        .reply(200, {
+          values: [
+            { user: { uuid: 'default1-uuid' } },
+            { user: { uuid: 'default2-uuid' } },
+          ],
+        })
+        .put('/2.0/repositories/some/repo/pullrequests/5', {
+          title: pr.title,
+          reviewers: [
+            { username: 'manual-reviewer' },
+            { uuid: 'default1-uuid' },
+            { uuid: 'default2-uuid' },
+          ],
+        })
+        .reply(200);
+      
+      await expect(
+        bitbucket.addReviewers(5, ['manual-reviewer']),
+      ).toResolve();
+    });
+
+    it('should not add default reviewers when bbUseDefaultReviewers is disabled', async () => {
+      const scope = await initRepoMock({
+        repository: 'some/repo',
+        bbUseDefaultReviewers: false,
+      });
+      
+      scope
+        .get('/2.0/repositories/some/repo/pullrequests/5')
+        .reply(200, pr)
+        .put('/2.0/repositories/some/repo/pullrequests/5', {
+          title: pr.title,
+          reviewers: [
+            { username: 'manual-reviewer' },
+          ],
+        })
+        .reply(200);
+      
+      await expect(
+        bitbucket.addReviewers(5, ['manual-reviewer']),
+      ).toResolve();
+    });
+
+    it('should handle duplicate reviewers between manual and default lists', async () => {
+      const scope = await initRepoMock({
+        repository: 'some/repo',
+        bbUseDefaultReviewers: true,
+      });
+      
+      scope
+        .get('/2.0/repositories/some/repo/pullrequests/5')
+        .reply(200, pr)
+        .get('/2.0/repositories/some/repo/effective-default-reviewers')
+        .reply(200, {
+          values: [
+            { user: { uuid: 'shared-reviewer' } },
+            { user: { uuid: 'default2-uuid' } },
+          ],
+        })
+        .put('/2.0/repositories/some/repo/pullrequests/5', {
+          title: pr.title,
+          reviewers: [
+            { uuid: 'shared-reviewer' },
+            { username: 'manual-reviewer' },
+            { uuid: 'default2-uuid' },
+          ],
+        })
+        .reply(200);
+      
+      await expect(
+        bitbucket.addReviewers(5, ['shared-reviewer', 'manual-reviewer']),
+      ).toResolve();
+    });
+
+    it('should continue if fetching default reviewers fails', async () => {
+      const scope = await initRepoMock({
+        repository: 'some/repo',
+        bbUseDefaultReviewers: true,
+      });
+      
+      scope
+        .get('/2.0/repositories/some/repo/pullrequests/5')
+        .reply(200, pr)
+        .get('/2.0/repositories/some/repo/effective-default-reviewers')
+        .reply(500)
+        .put('/2.0/repositories/some/repo/pullrequests/5', {
+          title: pr.title,
+          reviewers: [
+            { username: 'manual-reviewer' },
+          ],
+        })
+        .reply(200);
+      
+      await expect(
+        bitbucket.addReviewers(5, ['manual-reviewer']),
+      ).toResolve();
+    });
   });
 
   describe('ensureComment()', () => {
@@ -1596,84 +1704,6 @@ describe('modules/platform/bitbucket/index', () => {
         platformPrOptions: {
           bbUseDefaultReviewers: false,
           bbAutoResolvePrTasks: true,
-        },
-      });
-      expect(pr?.number).toBe(5);
-    });
-
-    it('skips default reviewers when automerge is enabled', async () => {
-      const scope = await initRepoMock();
-      scope
-        .post('/2.0/repositories/some/repo/pullrequests', {
-          title: 'title',
-          description: 'body',
-          source: { branch: { name: 'branch' } },
-          destination: { branch: { name: 'master' } },
-          close_source_branch: true,
-          reviewers: [], // Should be empty when automerge skips participants
-        })
-        .reply(200, { id: 5 })
-        .get(`/2.0/repositories/some/repo/pullrequests`)
-        .query(true)
-        .reply(200, {
-          values: [{ id: 5 }],
-        });
-      const pr = await bitbucket.createPr({
-        sourceBranch: 'branch',
-        targetBranch: 'master',
-        prTitle: 'title',
-        prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-          automergeSkipParticipantsInitially: true, // This should skip default reviewers
-        },
-      });
-      expect(pr?.number).toBe(5);
-    });
-
-    it('adds default reviewers when automerge is not enabled', async () => {
-      const reviewer = {
-        user: {
-          display_name: 'Jane Smith',
-          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
-          account_id: '456',
-        },
-      };
-      const scope = await initRepoMock();
-      scope
-        .get(
-          '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
-        )
-        .reply(200, {
-          values: [reviewer],
-        })
-        .post('/2.0/repositories/some/repo/pullrequests', {
-          title: 'title',
-          description: 'body',
-          source: { branch: { name: 'branch' } },
-          destination: { branch: { name: 'master' } },
-          close_source_branch: true,
-          reviewers: [
-            {
-              uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
-              display_name: 'Jane Smith',
-            },
-          ], // Should include default reviewer when automerge doesn't skip
-        })
-        .reply(200, { id: 5 })
-        .get(`/2.0/repositories/some/repo/pullrequests`)
-        .query(true)
-        .reply(200, {
-          values: [{ id: 5 }],
-        });
-      const pr = await bitbucket.createPr({
-        sourceBranch: 'branch',
-        targetBranch: 'master',
-        prTitle: 'title',
-        prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-          automergeSkipParticipantsInitially: false, // This should include default reviewers
         },
       });
       expect(pr?.number).toBe(5);

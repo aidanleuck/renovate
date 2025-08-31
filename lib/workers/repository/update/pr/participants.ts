@@ -72,27 +72,6 @@ export async function addParticipants(
   }
 
   let reviewers = config.reviewers ?? [];
-  
-  // Handle Bitbucket default reviewers if they were skipped during PR creation
-  if (
-    config.bbUseDefaultReviewers &&
-    config.automerge &&
-    !config.assignAutomerge &&
-    platform.getDefaultReviewers
-  ) {
-    try {
-      const defaultReviewers = await platform.getDefaultReviewers();
-      if (defaultReviewers.length > 0) {
-        logger.debug(
-          `Adding ${defaultReviewers.length} Bitbucket default reviewers due to automerge with failed status`,
-        );
-        reviewers = [...new Set([...reviewers, ...defaultReviewers])];
-      }
-    } catch (err) {
-      logger.debug({ err }, 'Failed to fetch Bitbucket default reviewers');
-    }
-  }
-  
   if (config.reviewersFromCodeOwners) {
     reviewers = await addCodeOwners(config, reviewers, pr);
     logger.debug(

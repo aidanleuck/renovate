@@ -54,13 +54,6 @@ export function getPlatformPrOptions(
       config.platformAutomerge,
   );
 
-  // This flag indicates whether participants (reviewers/assignees) should be 
-  // initially skipped during PR creation due to automerge settings.
-  // They will be added later if branch status indicates tests are failing.
-  const automergeSkipParticipantsInitially = Boolean(
-    config.automerge && !config.assignAutomerge,
-  );
-
   return {
     autoApprove: !!config.autoApprove,
     automergeStrategy: config.automergeStrategy,
@@ -70,7 +63,6 @@ export function getPlatformPrOptions(
     gitLabIgnoreApprovals: !!config.gitLabIgnoreApprovals,
     forkModeDisallowMaintainerEdits: !!config.forkModeDisallowMaintainerEdits,
     usePlatformAutomerge,
-    automergeSkipParticipantsInitially,
   };
 }
 
