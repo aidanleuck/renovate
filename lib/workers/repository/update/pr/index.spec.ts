@@ -21,7 +21,7 @@ import type { ChangeLogChange, ChangeLogRelease } from './changelog/types';
 import * as _participants from './participants';
 import * as _prCache from './pr-cache';
 import { generatePrBodyFingerprintConfig } from './pr-fingerprint';
-import { ensurePr } from '.';
+import { ensurePr, getPlatformPrOptions } from '.';
 import { git, logger, partial, platform, scm } from '~test/util';
 
 vi.mock('../../changelog');
@@ -1202,6 +1202,41 @@ describe('workers/repository/update/pr/index', () => {
           'PR cache not found',
         );
       });
+    });
+  });
+
+  describe('getPlatformPrOptions', () => {
+    it('sets automergeSkipParticipantsInitially when automerge is enabled and assignAutomerge is false', () => {
+      const result = getPlatformPrOptions({
+        automerge: true,
+        assignAutomerge: false,
+        bbUseDefaultReviewers: true,
+      } as any);
+
+      expect(result.automergeSkipParticipantsInitially).toBe(true);
+      expect(result.bbUseDefaultReviewers).toBe(true);
+    });
+
+    it('does not set automergeSkipParticipantsInitially when automerge is disabled', () => {
+      const result = getPlatformPrOptions({
+        automerge: false,
+        assignAutomerge: false,
+        bbUseDefaultReviewers: true,
+      } as any);
+
+      expect(result.automergeSkipParticipantsInitially).toBe(false);
+      expect(result.bbUseDefaultReviewers).toBe(true);
+    });
+
+    it('does not set automergeSkipParticipantsInitially when assignAutomerge is true', () => {
+      const result = getPlatformPrOptions({
+        automerge: true,
+        assignAutomerge: true,
+        bbUseDefaultReviewers: true,
+      } as any);
+
+      expect(result.automergeSkipParticipantsInitially).toBe(false);
+      expect(result.bbUseDefaultReviewers).toBe(true);
     });
   });
 });

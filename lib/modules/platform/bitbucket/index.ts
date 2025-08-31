@@ -762,6 +762,32 @@ export async function addReviewers(
   );
 }
 
+export async function getDefaultReviewers(): Promise<string[]> {
+  logger.debug('Fetching default reviewers');
+  
+  try {
+    const reviewersResponse = (
+      await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
+        `/2.0/repositories/${config.repository}/effective-default-reviewers`,
+        {
+          paginate: true,
+          cacheProvider: memCacheProvider,
+        },
+      )
+    ).body;
+    
+    const reviewers = reviewersResponse.values.map((reviewer: EffectiveReviewer) =>
+      reviewer.user.uuid
+    );
+    
+    logger.debug(`Found ${reviewers.length} default reviewers`);
+    return reviewers;
+  } catch (err) {
+    logger.debug({ err }, 'Failed to fetch default reviewers');
+    return [];
+  }
+}
+
 /* v8 ignore start */
 export function deleteLabel(): never {
   throw new Error('deleteLabel not implemented');
@@ -902,7 +928,11 @@ export async function createPr({
 
   let reviewers: Account[] = [];
 
-  if (platformPrOptions?.bbUseDefaultReviewers) {
+  // Only add default reviewers if not skipping participants for automerge
+  if (
+    platformPrOptions?.bbUseDefaultReviewers &&
+    !platformPrOptions?.automergeSkipParticipantsInitially
+  ) {
     const reviewersResponse = (
       await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
         `/2.0/repositories/${config.repository}/effective-default-reviewers`,

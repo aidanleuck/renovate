@@ -1600,6 +1600,84 @@ describe('modules/platform/bitbucket/index', () => {
       });
       expect(pr?.number).toBe(5);
     });
+
+    it('skips default reviewers when automerge is enabled', async () => {
+      const scope = await initRepoMock();
+      scope
+        .post('/2.0/repositories/some/repo/pullrequests', {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          close_source_branch: true,
+          reviewers: [], // Should be empty when automerge skips participants
+        })
+        .reply(200, { id: 5 })
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [{ id: 5 }],
+        });
+      const pr = await bitbucket.createPr({
+        sourceBranch: 'branch',
+        targetBranch: 'master',
+        prTitle: 'title',
+        prBody: 'body',
+        platformPrOptions: {
+          bbUseDefaultReviewers: true,
+          automergeSkipParticipantsInitially: true, // This should skip default reviewers
+        },
+      });
+      expect(pr?.number).toBe(5);
+    });
+
+    it('adds default reviewers when automerge is not enabled', async () => {
+      const reviewer = {
+        user: {
+          display_name: 'Jane Smith',
+          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+          account_id: '456',
+        },
+      };
+      const scope = await initRepoMock();
+      scope
+        .get(
+          '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
+        )
+        .reply(200, {
+          values: [reviewer],
+        })
+        .post('/2.0/repositories/some/repo/pullrequests', {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          close_source_branch: true,
+          reviewers: [
+            {
+              uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+              display_name: 'Jane Smith',
+            },
+          ], // Should include default reviewer when automerge doesn't skip
+        })
+        .reply(200, { id: 5 })
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [{ id: 5 }],
+        });
+      const pr = await bitbucket.createPr({
+        sourceBranch: 'branch',
+        targetBranch: 'master',
+        prTitle: 'title',
+        prBody: 'body',
+        platformPrOptions: {
+          bbUseDefaultReviewers: true,
+          automergeSkipParticipantsInitially: false, // This should include default reviewers
+        },
+      });
+      expect(pr?.number).toBe(5);
+    });
   });
 
   describe('getPr()', () => {
