@@ -16,6 +16,7 @@ export interface Config {
   repository: string;
   ignorePrAuthor: boolean;
   is_private: boolean;
+  bbUseDefaultReviewers: boolean;
 }
 
 export interface PagedResult<T = any> {

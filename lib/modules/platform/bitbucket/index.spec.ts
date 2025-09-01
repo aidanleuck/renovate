@@ -765,7 +765,19 @@ describe('modules/platform/bitbucket/index', () => {
 
   describe('addReviewers', () => {
     it('should add the given reviewers to the PR', async () => {
+      // This test verifies that manually specified reviewers are correctly added to the PR
       const scope = await initRepoMock();
+      scope
+        .get('/2.0/users/someuser')
+        .reply(200, {
+          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+          display_name: 'Some User',
+        })
+        .get('/2.0/users/someotheruser')
+        .reply(200, {
+          uuid: '{d2238482-2e9f-48b3-8630-de22ccb9e42f}',
+          display_name: 'Some Other User',
+        });
       scope
         .get('/2.0/repositories/some/repo/pullrequests/5')
         .reply(200, pr)
@@ -777,15 +789,27 @@ describe('modules/platform/bitbucket/index', () => {
     });
 
     it('should handle reviewers as username or UUID', async () => {
+      // This test verifies that both usernames and UUIDs can be used as reviewer identifiers
       const scope = await initRepoMock();
       scope
         .get('/2.0/repositories/some/repo/pullrequests/5')
         .reply(200, pr)
+        .get('/2.0/users/someuser')
+        .reply(200, {
+          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+          display_name: 'Some User',
+        })
+        .get('/2.0/users/%7B90b6646d-1724-4a64-9fd9-539515fe94e9%7D')
+        .reply(200, {
+          uuid: '{d2238482-2e9f-48b3-8630-de22ccb9e42f}',
+          display_name: 'Some Other User',
+        });
+      scope
         .put('/2.0/repositories/some/repo/pullrequests/5', {
           title: pr.title,
           reviewers: [
-            { username: 'someuser' },
             { uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}' },
+            { uuid: '{d2238482-2e9f-48b3-8630-de22ccb9e42f}' },
           ],
         })
         .reply(200);
@@ -793,6 +817,76 @@ describe('modules/platform/bitbucket/index', () => {
         bitbucket.addReviewers(5, [
           'someuser',
           '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+        ]),
+      ).toResolve();
+    });
+
+    it('filters out duplicates between reviewers and default reviewers', async () => {
+      // This test verifies that duplicate reviewers are properly filtered when combining
+      // manually specified reviewers with default reviewers
+      const defaultReviewer = {
+        type: 'default_reviewer',
+        reviewer_type: 'repository',
+        user: {
+          display_name: 'Jane Smith',
+          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+          account_id: '456',
+        },
+      };
+      const otherDefaultReviewer = {
+        type: 'default_reviewer',
+        reviewer_type: 'repository',
+        user: {
+          display_name: 'Bob Smith',
+          uuid: '{d2238482-2e9f-48b3-8630-de22ccb9e42f}',
+          account_id: '123',
+        },
+      };
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
+      scope
+        .get('/2.0/repositories/some/repo/pullrequests/5')
+        .reply(200, {
+          id: 5,
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          state: 'OPEN',
+          reviewers: [],
+        })
+        .get(
+          '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
+        )
+        .reply(200, {
+          values: [defaultReviewer, otherDefaultReviewer],
+        })
+        .get('/2.0/users/%7B90b6646d-1724-4a64-9fd9-539515fe94e9%7D')
+        .reply(200, {
+          display_name: 'Jane Smith',
+          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+          account_id: '456',
+        })
+        .get('/2.0/users/%7B8bbf5760-a061-4ec7-a7d3-edb73c2a5507%7D')
+        .reply(200, {
+          display_name: 'New Reviewer',
+          uuid: '{8bbf5760-a061-4ec7-a7d3-edb73c2a5507}',
+          account_id: '789',
+        })
+        .put('/2.0/repositories/some/repo/pullrequests/5', {
+          title: 'title',
+          reviewers: [
+            { uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}' },
+            { uuid: '{8bbf5760-a061-4ec7-a7d3-edb73c2a5507}' },
+            { uuid: '{d2238482-2e9f-48b3-8630-de22ccb9e42f}' },
+          ],
+        })
+        .reply(200);
+
+      // Call addReviewers with a reviewer that's also in the default reviewers
+      await expect(
+        bitbucket.addReviewers(5, [
+          '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
+          '{8bbf5760-a061-4ec7-a7d3-edb73c2a5507}',
         ]),
       ).toResolve();
     });
@@ -1079,7 +1173,10 @@ describe('modules/platform/bitbucket/index', () => {
   });
 
   describe('createPr()', () => {
-    it('posts PR', async () => {
+    it('posts PR and updates reviewers', async () => {
+      // This test verifies that:
+      // 1. A PR is created without reviewers
+      // 2. Default reviewers are added in a separate call to addReviewers
       const projectReviewer = {
         type: 'default_reviewer',
         reviewer_type: 'project',
@@ -1098,7 +1195,7 @@ describe('modules/platform/bitbucket/index', () => {
           account_id: '456',
         },
       };
-      const scope = await initRepoMock();
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
       scope
         .get(
           '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
@@ -1113,16 +1210,31 @@ describe('modules/platform/bitbucket/index', () => {
         .reply(200, {
           values: [{ id: 5 }],
         });
+
       const pr = await bitbucket.createPr({
         sourceBranch: 'branch',
         targetBranch: 'master',
         prTitle: 'title',
         prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-        },
       });
+
       expect(pr?.number).toBe(5);
+
+      scope
+        .get(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`)
+        .reply(200, pr);
+
+      scope
+        .put(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`, {
+          title: pr?.title,
+          reviewers: [
+            { uuid: projectReviewer.user.uuid },
+            { uuid: repoReviewer.user.uuid },
+          ],
+        })
+        .reply(200);
+
+      await bitbucket.addReviewers(pr.number, []);
     });
 
     it('removes inactive reviewers when creating pr', async () => {
@@ -1147,8 +1259,37 @@ describe('modules/platform/bitbucket/index', () => {
           account_id: '456',
         },
       };
-      const scope = await initRepoMock();
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
       scope
+        .post('/2.0/repositories/some/repo/pullrequests')
+        .reply(200, { id: 5 })
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [
+            {
+              id: 5,
+            },
+          ],
+        });
+
+      const pr = await bitbucket.createPr({
+        sourceBranch: 'branch',
+        targetBranch: 'master',
+        prTitle: 'title',
+        prBody: 'body',
+      });
+
+      scope
+        .get(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`)
+        .reply(200, {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          state: 'OPEN',
+          reviewers: [],
+        })
         .get(
           '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
         )
@@ -1159,7 +1300,7 @@ describe('modules/platform/bitbucket/index', () => {
             inactiveReviewer,
           ],
         })
-        .post('/2.0/repositories/some/repo/pullrequests')
+        .put(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`)
         .reply(400, {
           type: 'error',
           error: {
@@ -1189,22 +1330,13 @@ describe('modules/platform/bitbucket/index', () => {
         .reply(200, {
           account_status: 'inactive',
         })
-        .post('/2.0/repositories/some/repo/pullrequests')
-        .reply(200, { id: 5 })
-        .get(`/2.0/repositories/some/repo/pullrequests`)
-        .query(true)
+        .put(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`)
         .reply(200, {
-          values: [{ id: 5 }],
+          title: pr?.title,
+          reviewers: [],
         });
-      const pr = await bitbucket.createPr({
-        sourceBranch: 'branch',
-        targetBranch: 'master',
-        prTitle: 'title',
-        prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-        },
-      });
+
+      await bitbucket.addReviewers(pr.number, []);
       expect(pr?.number).toBe(5);
     });
 
@@ -1223,7 +1355,7 @@ describe('modules/platform/bitbucket/index', () => {
           account_id: '456',
         },
       };
-      const scope = await initRepoMock();
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
       scope
         .get(
           '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
@@ -1232,6 +1364,55 @@ describe('modules/platform/bitbucket/index', () => {
           values: [memberReviewer, notMemberReviewer],
         })
         .post('/2.0/repositories/some/repo/pullrequests')
+        .reply(200, {
+          id: 5,
+        })
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [
+            {
+              id: 5,
+            },
+          ],
+        })
+        .get(
+          '/2.0/workspaces/some/members/%7Bd2238482-2e9f-48b3-8630-de22ccb9e42f%7D',
+        )
+        .reply(404)
+        .get(
+          '/2.0/workspaces/some/members/%7B90b6646d-1724-4a64-9fd9-539515fe94e9%7D',
+        )
+        .reply(200);
+
+      const pr = await bitbucket.createPr({
+        sourceBranch: 'branch',
+        targetBranch: 'master',
+        prTitle: 'title',
+        prBody: 'body',
+      });
+
+      expect(pr?.number).toBe(5);
+
+      scope
+        .get(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`)
+        .reply(200, {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          state: 'OPEN',
+          reviewers: [],
+          number: pr?.number,
+        })
+        .put(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`, {
+          title: 'title',
+
+          reviewers: [
+            { uuid: memberReviewer.user.uuid },
+            { uuid: notMemberReviewer.user.uuid },
+          ],
+        })
         .reply(400, {
           type: 'error',
           error: {
@@ -1244,31 +1425,13 @@ describe('modules/platform/bitbucket/index', () => {
               'reviewers: Bob Smith is not a member of this workspace and cannot be added to this pull request',
           },
         })
-        .get(
-          '/2.0/workspaces/some/members/%7Bd2238482-2e9f-48b3-8630-de22ccb9e42f%7D',
-        )
-        .reply(404)
-        .get(
-          '/2.0/workspaces/some/members/%7B90b6646d-1724-4a64-9fd9-539515fe94e9%7D',
-        )
-        .reply(200)
-        .post('/2.0/repositories/some/repo/pullrequests')
-        .reply(200, { id: 5 })
-        .get(`/2.0/repositories/some/repo/pullrequests`)
-        .query(true)
-        .reply(200, {
-          values: [{ id: 5 }],
-        });
-      const pr = await bitbucket.createPr({
-        sourceBranch: 'branch',
-        targetBranch: 'master',
-        prTitle: 'title',
-        prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-        },
-      });
-      expect(pr?.number).toBe(5);
+        .put(`/2.0/repositories/some/repo/pullrequests/${pr?.number}`, {
+          title: 'title',
+          reviewers: [{ uuid: memberReviewer.user.uuid }],
+        })
+        .reply(200);
+
+      await bitbucket.addReviewers(pr.number, []);
     });
 
     it('throws exception when unable to check default reviewers workspace membership', async () => {
@@ -1279,7 +1442,7 @@ describe('modules/platform/bitbucket/index', () => {
           account_id: '123',
         },
       };
-      const scope = await initRepoMock();
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
       scope
         .get(
           '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
@@ -1288,6 +1451,27 @@ describe('modules/platform/bitbucket/index', () => {
           values: [reviewer],
         })
         .post('/2.0/repositories/some/repo/pullrequests')
+        .reply(200)
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [{ id: 5 }],
+        })
+
+        .get(`/2.0/repositories/some/repo/pullrequests/5`)
+        .reply(200, {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          state: 'OPEN',
+          reviewers: [{ uuid: reviewer.user.uuid }],
+          number: 5,
+        })
+        .put(`/2.0/repositories/some/repo/pullrequests/5`, {
+          title: 'title',
+          reviewers: [{ uuid: reviewer.user.uuid }],
+        })
         .reply(400, {
           type: 'error',
           error: {
@@ -1304,17 +1488,16 @@ describe('modules/platform/bitbucket/index', () => {
           '/2.0/workspaces/some/members/%7Bd2238482-2e9f-48b3-8630-de22ccb9e42f%7D',
         )
         .reply(401);
-      await expect(() =>
-        bitbucket.createPr({
-          sourceBranch: 'branch',
-          targetBranch: 'master',
-          prTitle: 'title',
-          prBody: 'body',
-          platformPrOptions: {
-            bbUseDefaultReviewers: true,
-          },
-        }),
-      ).rejects.toThrow('Response code 401 (Unauthorized)');
+
+      await bitbucket.createPr({
+        sourceBranch: 'branch',
+        targetBranch: 'master',
+        prTitle: 'title',
+        prBody: 'body',
+      });
+      await expect(() => bitbucket.addReviewers(5, [])).rejects.toThrow(
+        'Response code 401 (Unauthorized)',
+      );
     });
 
     it('removes reviewer if they are also the author of the pr', async () => {
@@ -1334,7 +1517,7 @@ describe('modules/platform/bitbucket/index', () => {
           },
         },
       ];
-      const scope = await initRepoMock();
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
       scope
         .get(
           '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
@@ -1343,6 +1526,30 @@ describe('modules/platform/bitbucket/index', () => {
           values: reviewers,
         })
         .post('/2.0/repositories/some/repo/pullrequests')
+        .reply(200, {
+          id: 5,
+        })
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [{ id: 5 }],
+        })
+        .get(`/2.0/repositories/some/repo/pullrequests/5`)
+        .reply(200, {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          state: 'OPEN',
+          reviewers: [],
+        })
+        .put(`/2.0/repositories/some/repo/pullrequests/5`, {
+          title: 'title',
+          reviewers: [
+            { uuid: reviewers[0].user.uuid },
+            { uuid: reviewers[1].user.uuid },
+          ],
+        })
         .reply(400, {
           type: 'error',
           error: {
@@ -1353,23 +1560,20 @@ describe('modules/platform/bitbucket/index', () => {
             },
           },
         })
-        .post('/2.0/repositories/some/repo/pullrequests')
-        .reply(200, { id: 5 })
-        .get(`/2.0/repositories/some/repo/pullrequests`)
-        .query(true)
-        .reply(200, {
-          values: [{ id: 5 }],
-        });
+        .put(`/2.0/repositories/some/repo/pullrequests/5`, {
+          title: 'title',
+          reviewers: [{ uuid: reviewers[0].user.uuid }],
+        })
+        .reply(200);
       const pr = await bitbucket.createPr({
         sourceBranch: 'branch',
         targetBranch: 'master',
         prTitle: 'title',
         prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-        },
       });
       expect(pr?.number).toBe(5);
+
+      await bitbucket.addReviewers(pr.number, []);
     });
 
     it('rethrows exception when PR create error due to unknown reviewers error', async () => {
@@ -1380,7 +1584,7 @@ describe('modules/platform/bitbucket/index', () => {
         },
       };
 
-      const scope = await initRepoMock();
+      const scope = await initRepoMock({ bbUseDefaultReviewers: true });
       scope
         .get(
           '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
@@ -1389,6 +1593,26 @@ describe('modules/platform/bitbucket/index', () => {
           values: [reviewer],
         })
         .post('/2.0/repositories/some/repo/pullrequests')
+        .reply(200)
+        .get(`/2.0/repositories/some/repo/pullrequests`)
+        .query(true)
+        .reply(200, {
+          values: [{ id: 5 }],
+        })
+        .get(`/2.0/repositories/some/repo/pullrequests/5`)
+        .reply(200, {
+          title: 'title',
+          description: 'body',
+          source: { branch: { name: 'branch' } },
+          destination: { branch: { name: 'master' } },
+          state: 'OPEN',
+          reviewers: [],
+          number: 5,
+        })
+        .put(`/2.0/repositories/some/repo/pullrequests/5`, {
+          title: 'title',
+          reviewers: [{ uuid: reviewer.user.uuid }],
+        })
         .reply(400, {
           type: 'error',
           error: {
@@ -1398,54 +1622,34 @@ describe('modules/platform/bitbucket/index', () => {
             message: 'Some other unhandled error',
           },
         });
-      await expect(() =>
-        bitbucket.createPr({
-          sourceBranch: 'branch',
-          targetBranch: 'master',
-          prTitle: 'title',
-          prBody: 'body',
-          platformPrOptions: {
-            bbUseDefaultReviewers: true,
-          },
-        }),
-      ).rejects.toThrow('Response code 400 (Bad Request)');
+      await bitbucket.createPr({
+        sourceBranch: 'branch',
+        targetBranch: 'master',
+        prTitle: 'title',
+        prBody: 'body',
+      });
+      await expect(() => bitbucket.addReviewers(5, [])).rejects.toThrow(
+        'Response code 400 (Bad Request)',
+      );
     });
 
     it('rethrows exception when PR create error not due to reviewers field', async () => {
-      const reviewer = {
-        user: {
-          display_name: 'Jane Smith',
-          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
-        },
-      };
-
       const scope = await initRepoMock();
-      scope
-        .get(
-          '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
-        )
-        .reply(200, {
-          values: [reviewer],
-        })
-        .post('/2.0/repositories/some/repo/pullrequests')
-        .reply(400, {
-          type: 'error',
-          error: {
-            fields: {
-              description: ['Some other unhandled error'],
-            },
-            message: 'Some other unhandled error',
+      scope.post('/2.0/repositories/some/repo/pullrequests').reply(400, {
+        type: 'error',
+        error: {
+          fields: {
+            description: ['Some other unhandled error'],
           },
-        });
+          message: 'Some other unhandled error',
+        },
+      });
       await expect(() =>
         bitbucket.createPr({
           sourceBranch: 'branch',
           targetBranch: 'master',
           prTitle: 'title',
           prBody: 'body',
-          platformPrOptions: {
-            bbUseDefaultReviewers: true,
-          },
         }),
       ).rejects.toThrow('Response code 400 (Bad Request)');
     });
@@ -1517,7 +1721,6 @@ describe('modules/platform/bitbucket/index', () => {
         prTitle: 'title',
         prBody: 'body',
         platformPrOptions: {
-          bbUseDefaultReviewers: false,
           bbAutoResolvePrTasks: true,
         },
       });
@@ -1546,7 +1749,6 @@ describe('modules/platform/bitbucket/index', () => {
         prTitle: 'title',
         prBody: 'body',
         platformPrOptions: {
-          bbUseDefaultReviewers: false,
           bbAutoResolvePrTasks: true,
         },
       });
@@ -1594,7 +1796,6 @@ describe('modules/platform/bitbucket/index', () => {
         prTitle: 'title',
         prBody: 'body',
         platformPrOptions: {
-          bbUseDefaultReviewers: false,
           bbAutoResolvePrTasks: true,
         },
       });
@@ -1932,29 +2133,10 @@ describe('modules/platform/bitbucket/index', () => {
 
   describe('maintains pr cache integrity at runtime', () => {
     it('pr cache gets updated after a pr is created', async () => {
-      const projectReviewer = {
-        type: 'default_reviewer',
-        reviewer_type: 'project',
-        user: {
-          display_name: 'Bob Smith',
-          uuid: '{d2238482-2e9f-48b3-8630-de22ccb9e42f}',
-          account_id: '123',
-        },
-      };
-      const repoReviewer = {
-        type: 'default_reviewer',
-        reviewer_type: 'repository',
-        user: {
-          display_name: 'Jane Smith',
-          uuid: '{90b6646d-1724-4a64-9fd9-539515fe94e9}',
-          account_id: '456',
-        },
-      };
-
       const scope = httpMock.scope(baseUrl);
       scope.get('/2.0/user').reply(200, { uuid: '12345' });
       await bitbucket.initPlatform({ username: 'renovate', password: 'pass' });
-      await initRepoMock(undefined, null, scope);
+      await initRepoMock({ bbUseDefaultReviewers: true }, null, scope);
       scope
         .get(`/2.0/repositories/some/repo/pullrequests`)
         .query(true)
@@ -1969,12 +2151,6 @@ describe('modules/platform/bitbucket/index', () => {
             },
           ],
         })
-        .get(
-          '/2.0/repositories/some/repo/effective-default-reviewers?pagelen=100',
-        )
-        .reply(200, {
-          values: [projectReviewer, repoReviewer],
-        })
         .post('/2.0/repositories/some/repo/pullrequests')
         .reply(200, { id: 5 });
 
@@ -1985,9 +2161,6 @@ describe('modules/platform/bitbucket/index', () => {
         targetBranch: 'master',
         prTitle: 'title',
         prBody: 'body',
-        platformPrOptions: {
-          bbUseDefaultReviewers: true,
-        },
       });
 
       const newPrList = await bitbucket.getPrList();

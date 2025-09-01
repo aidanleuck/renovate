@@ -837,6 +837,62 @@ describe('modules/platform/bitbucket-server/index', () => {
           await expect(bitbucket.addReviewers(5, ['name'])).toResolve();
         });
 
+        it('filters out duplicates between reviewers and default reviewers', async () => {
+          // This test verifies that:
+          // 1. Default reviewers are properly fetched from the Bitbucket Server API
+          // 2. Default reviewers are combined with manually specified reviewers
+          // 3. No duplicate reviewers are sent in the API request
+          // 4. Existing reviewers on the PR are preserved
+          const scope = await initRepo({ bbUseDefaultReviewers: true });
+          const mockPr = {
+            ...prMock(url, 'SOME', 'repo'),
+            reviewers: [
+              {
+                user: { name: 'existingReviewer' },
+              },
+            ],
+          };
+
+          scope
+            .get(
+              `${urlPath}/rest/api/1.0/projects/SOME/repos/repo/pull-requests/5`,
+            )
+            .thrice()
+            .reply(200, mockPr)
+            .get(`${urlPath}/rest/api/1.0/projects/SOME/repos/repo`)
+            .reply(200, { id: 5 })
+            .get(
+              `${urlPath}/rest/default-reviewers/1.0/projects/SOME/repos/repo/reviewers?sourceRefId=refs/heads/userName1/pullRequest5&targetRefId=refs/heads/master&sourceRepoId=5&targetRepoId=5`,
+            )
+            .reply(200, [
+              { name: 'defaultReviewer' },
+              { name: 'sharedReviewer' },
+            ])
+            .put(
+              `${urlPath}/rest/api/1.0/projects/SOME/repos/repo/pull-requests/5`,
+              (body) => {
+                const reviewerNames = body.reviewers.map(
+                  (r: any) => r?.user?.name,
+                );
+                return (
+                  JSON.stringify(reviewerNames.sort()) ===
+                  JSON.stringify(
+                    [
+                      'defaultReviewer',
+                      'existingReviewer',
+                      'sharedReviewer',
+                      'uniqueReviewer',
+                    ].sort(),
+                  )
+                );
+              },
+            )
+            .reply(200);
+          await expect(
+            bitbucket.addReviewers(5, ['sharedReviewer', 'uniqueReviewer']),
+          ).toResolve();
+        });
+
         it('throws not-found 1', async () => {
           await initRepo();
           await expect(
@@ -1798,12 +1854,6 @@ describe('modules/platform/bitbucket-server/index', () => {
         it('posts PR', async () => {
           const scope = await initRepo();
           scope
-            .get(`${urlPath}/rest/api/1.0/projects/SOME/repos/repo`)
-            .reply(200, prMock(url, 'SOME', 'repo'))
-            .get(
-              `${urlPath}/rest/default-reviewers/1.0/projects/SOME/repos/repo/reviewers?sourceRefId=refs/heads/branch&targetRefId=refs/heads/master&sourceRepoId=5&targetRepoId=5`,
-            )
-            .reply(200, [{ name: 'jcitizen' }])
             .post(
               `${urlPath}/rest/api/1.0/projects/SOME/repos/repo/pull-requests`,
             )
@@ -1821,20 +1871,22 @@ describe('modules/platform/bitbucket-server/index', () => {
             targetBranch: 'master',
             prTitle: 'title',
             prBody: 'body',
-            platformPrOptions: {
-              bbUseDefaultReviewers: true,
-            },
+            platformPrOptions: {},
           });
           expect(pr?.number).toBe(5);
         });
 
-        it('posts PR default branch', async () => {
-          const scope = await initRepo();
+        it('posts PR default branch and adds reviewers in a separate step', async () => {
+          // This test verifies the updated flow:
+          // 1. Create PR without reviewers
+          // 2. Get default reviewers separately in addReviewers
+          // 3. Update the PR with the default reviewers
+          const scope = await initRepo({ bbUseDefaultReviewers: true });
           scope
             .get(`${urlPath}/rest/api/1.0/projects/SOME/repos/repo`)
             .reply(200, prMock(url, 'SOME', 'repo'))
             .get(
-              `${urlPath}/rest/default-reviewers/1.0/projects/SOME/repos/repo/reviewers?sourceRefId=refs/heads/branch&targetRefId=refs/heads/master&sourceRepoId=5&targetRepoId=5`,
+              `${urlPath}/rest/default-reviewers/1.0/projects/SOME/repos/repo/reviewers?sourceRefId=refs/heads/userName1/pullRequest5&targetRefId=refs/heads/master&sourceRepoId=5&targetRepoId=5`,
             )
             .reply(200, [{ name: 'jcitizen' }])
             .post(
@@ -1855,11 +1907,30 @@ describe('modules/platform/bitbucket-server/index', () => {
             prTitle: 'title',
             prBody: 'body',
             labels: null,
-            platformPrOptions: {
-              bbUseDefaultReviewers: true,
-            },
+            platformPrOptions: {},
           });
           expect(pr?.number).toBe(5);
+
+          scope
+            .get(
+              `${urlPath}/rest/api/1.0/projects/SOME/repos/repo/pull-requests/5`,
+            )
+            .thrice()
+            .reply(200, prMock(url, 'SOME', 'repo'))
+            .put(
+              `${urlPath}/rest/api/1.0/projects/SOME/repos/repo/pull-requests/5`,
+              {
+                title: 'title',
+                version: 1,
+                reviewers: [
+                  { user: { name: 'userName2' } },
+                  { user: { name: 'jcitizen' } },
+                ],
+              },
+            )
+            .reply(200);
+
+          await bitbucket.addReviewers(5, []);
         });
       });
 

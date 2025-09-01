@@ -192,6 +192,7 @@ export async function initRepo({
   cloneSubmodulesFilter,
   ignorePrAuthor,
   bbUseDevelopmentBranch,
+  bbUseDefaultReviewers,
 }: RepoParams): Promise<RepoResult> {
   logger.debug(`initRepo("${repository}")`);
   const opts = hostRules.find({
@@ -201,6 +202,7 @@ export async function initRepo({
   config = {
     repository,
     ignorePrAuthor,
+    bbUseDefaultReviewers: !!bbUseDefaultReviewers,
   } as Config;
   let info: RepoInfo;
   let mainBranch: string;
@@ -731,35 +733,168 @@ export function addAssignees(
   return Promise.resolve();
 }
 
+/**
+ * Looks up a Bitbucket user by their username or UUID
+ *
+ * This function helps resolve user identifiers to their complete account details
+ * before adding them as reviewers. Bitbucket Cloud's API can look up users
+ * by both username and UUID.
+ *
+ * @param userIdentifier - The username or UUID of the user to look up
+ * @returns The user account details, or null if not found
+ */
+async function getUser(userIdentifier: string): Promise<Account | null> {
+  try {
+    const user = (
+      await bitbucketHttp.getJsonUnchecked<Account>(
+        `/2.0/users/${userIdentifier}`,
+        { cacheProvider: memCacheProvider },
+      )
+    ).body;
+
+    return user;
+  } catch (err) {
+    logger.debug({ err, userIdentifier }, 'Failed to fetch user by username');
+    return null;
+  }
+}
+
 export async function addReviewers(
   prId: number,
   reviewers: string[],
 ): Promise<void> {
   logger.debug(`Adding reviewers '${reviewers.join(', ')}' to #${prId}`);
 
-  // TODO #22198
+  const allReviewers: Account[] = [];
+
+  // First, resolve all the provided reviewers to user accounts
+  // This is necessary because Bitbucket Cloud requires UUIDs for reviewers
+  for (const userIdentifier of reviewers) {
+    const user = await getUser(userIdentifier);
+    if (user) {
+      allReviewers.push({
+        uuid: user.uuid,
+        display_name: user.display_name,
+      });
+    } else {
+      logger.warn(
+        `Could not find Bitbucket user with username: ${userIdentifier}`,
+      );
+    }
+  }
+
+  // Add default reviewers if bbUseDefaultReviewers is enabled
+  // This implementation fetches default reviewers from the Bitbucket Cloud API
+  // and combines them with manually specified reviewers
+  if (config.bbUseDefaultReviewers) {
+    try {
+      logger.debug('Fetching default reviewers');
+
+      // Call the Bitbucket Cloud effective-default-reviewers API
+      // This returns the configured default reviewers for the repository
+      const reviewersResponse = (
+        await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
+          `/2.0/repositories/${config.repository}/effective-default-reviewers`,
+          {
+            paginate: true,
+            cacheProvider: memCacheProvider,
+          },
+        )
+      ).body;
+
+      // Convert the API response into Account objects that can be used in the PR update
+      const defaultReviewers: Account[] = reviewersResponse.values
+        .map((reviewer: EffectiveReviewer) => {
+          return {
+            uuid: reviewer.user.uuid,
+            display_name: reviewer.user.display_name,
+          };
+        })
+        .filter(Boolean);
+
+      if (defaultReviewers.length > 0) {
+        logger.debug({ defaultReviewers }, 'Found default reviewers');
+        allReviewers.push(...defaultReviewers);
+      }
+    } catch (err) {
+      logger.debug({ err }, 'Failed to fetch default reviewers');
+    }
+  }
+
+  // Get the current PR title which is required for the update API call
+  // Bitbucket requires sending the title with the update, even if we're only updating reviewers
   const { title } = (await getPr(prId))!;
 
+  // Remove duplicate reviewers by UUID
+  // Bitbucket API does not accept duplicate reviewers
+  // https://developer.atlassian.com/bitbucket/api/2/reference/resource/repositories/%7Bworkspace%7D/%7Brepo_slug%7D/pullrequests/%7Bpull_request_id%7D#put
+  const identifiers = new Set<string>();
+  allReviewers.forEach((reviewer) => {
+    identifiers.add(reviewer.uuid);
+  });
+
+  // Prepare the body for the PR update API call
+  // The reviewer format depends on whether we're using UUIDs or usernames
   const body = {
     title,
-    reviewers: reviewers.map((username: string) => {
+    reviewers: Array.from(identifiers).map((identifier: string) => {
       const isUUID =
-        username.startsWith('{') &&
-        username.endsWith('}') &&
-        UUIDRegex.test(username.slice(1, -1));
+        identifier.startsWith('{') &&
+        identifier.endsWith('}') &&
+        UUIDRegex.test(identifier.slice(1, -1));
       const key = isUUID ? 'uuid' : 'username';
       return {
-        [key]: username,
+        [key]: identifier,
       };
     }),
   };
 
-  await bitbucketHttp.putJson(
-    `/2.0/repositories/${config.repository}/pullrequests/${prId}`,
-    {
-      body,
-    },
-  );
+  try {
+    // Update the PR with the new reviewers
+    await bitbucketHttp.putJson(
+      `/2.0/repositories/${config.repository}/pullrequests/${prId}`,
+      {
+        body,
+      },
+    );
+  } catch (err) {
+    // If the update fails, try sanitizing reviewers
+    // This handles cases where reviewers may be inactive or lack permissions
+    const sanitizedReviewers = await sanitizeReviewers(allReviewers, err);
+
+    if (sanitizedReviewers === undefined) {
+      throw err;
+    }
+
+    logger.debug('Retrying addReviewers with sanitized reviewers');
+
+    // Remove duplicate reviewers again after sanitization
+    const identifiers = new Set<string>();
+    sanitizedReviewers.forEach((reviewer) => {
+      identifiers.add(reviewer.uuid);
+    });
+
+    const sanitizedBody = {
+      title,
+      reviewers: Array.from(identifiers).map((identifier: string) => {
+        const isUUID =
+          identifier.startsWith('{') &&
+          identifier.endsWith('}') &&
+          UUIDRegex.test(identifier.slice(1, -1));
+        const key = isUUID ? 'uuid' : 'username';
+        return {
+          [key]: identifier,
+        };
+      }),
+    };
+
+    await bitbucketHttp.putJson(
+      `/2.0/repositories/${config.repository}/pullrequests/${prId}`,
+      {
+        body: sanitizedBody,
+      },
+    );
+  }
 }
 
 /* v8 ignore start */
@@ -900,24 +1035,10 @@ export async function createPr({
 
   logger.debug({ repository: config.repository, title, base }, 'Creating PR');
 
-  let reviewers: Account[] = [];
-
-  if (platformPrOptions?.bbUseDefaultReviewers) {
-    const reviewersResponse = (
-      await bitbucketHttp.getJsonUnchecked<PagedResult<EffectiveReviewer>>(
-        `/2.0/repositories/${config.repository}/effective-default-reviewers`,
-        {
-          paginate: true,
-          cacheProvider: memCacheProvider,
-        },
-      )
-    ).body;
-    reviewers = reviewersResponse.values.map((reviewer: EffectiveReviewer) => ({
-      uuid: reviewer.user.uuid,
-      display_name: reviewer.user.display_name,
-    }));
-  }
-
+  // Create the PR with an empty reviewers array
+  // Reviewers (including default reviewers) will be added separately via the addReviewers function
+  // This is different from the previous behavior where default reviewers were added during PR creation
+  // The bbUseDefaultReviewers config flag now works at the repository level instead of per PR
   const body = {
     title,
     description: sanitize(description),
@@ -932,7 +1053,7 @@ export async function createPr({
       },
     },
     close_source_branch: true,
-    reviewers,
+    reviewers: [],
   };
 
   try {
@@ -956,36 +1077,8 @@ export async function createPr({
     }
     return pr;
   } catch (err) /* v8 ignore start */ {
-    // Try sanitizing reviewers
-    const sanitizedReviewers = await sanitizeReviewers(reviewers, err);
-
-    if (sanitizedReviewers === undefined) {
-      logger.warn({ err }, 'Error creating pull request');
-      throw err;
-    } else {
-      const prRes = (
-        await bitbucketHttp.postJson<PrResponse>(
-          `/2.0/repositories/${config.repository}/pullrequests`,
-          {
-            body: {
-              ...body,
-              reviewers: sanitizedReviewers,
-            },
-          },
-        )
-      ).body;
-      const pr = utils.prInfo(prRes);
-      await BitbucketPrCache.setPr(
-        bitbucketHttp,
-        config.repository,
-        renovateUserUuid,
-        pr,
-      );
-      if (platformPrOptions?.bbAutoResolvePrTasks) {
-        await autoResolvePrTasks(pr);
-      }
-      return pr;
-    }
+    logger.warn({ err }, 'Error creating pull request');
+    throw err;
   } /* v8 ignore stop */
 }
 

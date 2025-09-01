@@ -50,6 +50,7 @@ export interface RepoParams {
   cloneSubmodulesFilter?: string[];
   ignorePrAuthor?: boolean;
   bbUseDevelopmentBranch?: boolean;
+  bbUseDefaultReviewers?: boolean;
   includeMirrors?: boolean;
 }
 
@@ -101,7 +102,6 @@ export interface PlatformPrOptions {
   autoApprove?: boolean;
   automergeStrategy?: MergeStrategy;
   azureWorkItemId?: number;
-  bbUseDefaultReviewers?: boolean;
   bbAutoResolvePrTasks?: boolean;
   gitLabIgnoreApprovals?: boolean;
   usePlatformAutomerge?: boolean;

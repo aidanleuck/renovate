@@ -60,7 +60,6 @@ import type {
   BbsRestBranch,
   BbsRestPr,
   BbsRestRepo,
-  BbsRestUserRef,
 } from './types';
 import * as utils from './utils';
 import { getExtraCloneOpts, parseModifier, splitEscapedSpaces } from './utils';
@@ -244,6 +243,7 @@ export async function initRepo({
   cloneSubmodulesFilter,
   ignorePrAuthor,
   gitUrl,
+  bbUseDefaultReviewers,
 }: RepoParams): Promise<RepoResult> {
   logger.debug(`initRepo("${JSON.stringify({ repository }, null, 2)}")`);
   const opts = hostRules.find({
@@ -260,6 +260,7 @@ export async function initRepo({
     prVersions: new Map<number, number>(),
     username: opts.username,
     ignorePrAuthor,
+    bbUseDefaultReviewers: !!bbUseDefaultReviewers,
   } as any;
 
   try {
@@ -685,26 +686,84 @@ export function addAssignees(iid: number, assignees: string[]): Promise<void> {
   return Promise.resolve();
 }
 
+const escapeHash = (input: string): string =>
+  input?.replace(regEx(/#/g), '%23');
+
 export async function addReviewers(
   prNo: number,
   reviewers: string[],
 ): Promise<void> {
   logger.debug(`Adding reviewers '${reviewers.join(', ')}' to #${prNo}`);
 
+  let allReviewers = [...reviewers];
+
+  // Add default reviewers if bbUseDefaultReviewers is enabled
+  // This implementation fetches default reviewers from the Bitbucket Server API
+  // and combines them with manually specified reviewers
+  if (config.bbUseDefaultReviewers) {
+    try {
+      logger.debug(`Fetching default reviewers`);
+
+      // First, get the repository ID which is needed for the default reviewers API
+      const { id } = (
+        await bitbucketServerHttp.getJsonUnchecked<{ id: number }>(
+          `./rest/api/1.0/projects/${config.projectKey}/repos/${config.repositorySlug}`,
+        )
+      ).body;
+
+      // Get the PR details to extract source and target branch information
+      // This is necessary because default reviewers in Bitbucket Server are configured
+      // based on source and target branch combinations
+      const pr = await getPr(prNo);
+      if (!pr) {
+        throw new Error(REPOSITORY_NOT_FOUND);
+      }
+
+      // Call the Bitbucket Server default-reviewers API with the source and target branch information
+      // This API returns users who should review PRs between these branches based on repository settings
+      const defReviewers = (
+        await bitbucketServerHttp.getJsonUnchecked<{ name: string }[]>(
+          `./rest/default-reviewers/1.0/projects/${config.projectKey}/repos/${
+            config.repositorySlug
+          }/reviewers?sourceRefId=refs/heads/${escapeHash(
+            pr?.sourceBranch ?? '',
+          )}&targetRefId=refs/heads/${pr?.targetBranch ?? ''}&sourceRepoId=${id}&targetRepoId=${id}`,
+        )
+      ).body;
+
+      // If default reviewers were found, add them to our reviewers list
+      if (defReviewers.length > 0) {
+        const defaultReviewers = defReviewers.map((u) => u.name);
+        logger.debug({ defaultReviewers }, 'Found default reviewers');
+        // De-duplicate reviewers using a Set (in case the same reviewer is both manually specified
+        // and included in the default reviewers list)
+        allReviewers = [...new Set([...allReviewers, ...defaultReviewers])];
+      }
+    } catch (err) {
+      logger.debug({ err }, 'Failed to fetch default reviewers');
+    }
+  }
+
+  // Process email addresses and convert them to user slugs
+  // Bitbucket Server requires user slugs (usernames) for reviewer assignment
   const reviewerSlugs = new Set<string>();
 
-  for (const entry of reviewers) {
-    // If entry is an email-address, resolve userslugs
+  for (const entry of allReviewers) {
+    // If entry is an email address, resolve it to user slugs using the Bitbucket Server API
     if (isEmailAdress(entry)) {
+      // Call the getUserSlugsByEmail helper function to resolve the email to usernames
       const slugs = await getUserSlugsByEmail(entry);
       for (const slug of slugs) {
         reviewerSlugs.add(slug);
       }
     } else {
+      // If it's already a username, add it directly
       reviewerSlugs.add(entry);
     }
   }
 
+  // Use the retry mechanism to handle potential race conditions or repository changes
+  // This is necessary because the PR may be updated by other processes between our read and update
   await retry(updatePRAndAddReviewers, [prNo, Array.from(reviewerSlugs)], 3, [
     REPOSITORY_CHANGED,
   ]);
@@ -749,6 +808,15 @@ export async function getUserSlugsByEmail(
   return [];
 }
 
+/**
+ * Updates a pull request and adds reviewers to it
+ *
+ * This function fetches the current PR data, adds new reviewers while preserving existing ones,
+ * and updates the PR via the Bitbucket Server API.
+ *
+ * @param prNo - The pull request number to update
+ * @param reviewers - Array of reviewer usernames to add
+ */
 async function updatePRAndAddReviewers(
   prNo: number,
   reviewers: string[],
@@ -759,9 +827,11 @@ async function updatePRAndAddReviewers(
       throw new Error(REPOSITORY_NOT_FOUND);
     }
 
-    // TODO: can `reviewers` be undefined? (#22198)
+    // Combine existing reviewers with new reviewers, removing duplicates
+    // This ensures we don't lose existing reviewers when adding new ones
     const reviewersSet = new Set([...pr.reviewers!, ...reviewers]);
 
+    // Update the PR with the combined list of reviewers
     await bitbucketServerHttp.putJson(
       `./rest/api/1.0/projects/${config.projectKey}/repos/${config.repositorySlug}/pull-requests/${prNo}`,
       {
@@ -774,6 +844,8 @@ async function updatePRAndAddReviewers(
         },
       },
     );
+
+    // Refresh the PR in the cache to reflect our changes
     await getPr(prNo, true);
   } catch (err) {
     logger.warn({ err, reviewers, prNo }, `Failed to add reviewers`);
@@ -781,7 +853,8 @@ async function updatePRAndAddReviewers(
       throw new Error(REPOSITORY_NOT_FOUND);
     } else if (err.statusCode === 409) {
       if (utils.isInvalidReviewersResponse(err)) {
-        // Retry again with invalid reviewers being removed
+        // Handle invalid reviewer errors by retrying without the invalid reviewers
+        // This can happen if a user is deleted or lacks repository permissions
         const invalidReviewers = utils.getInvalidReviewers(err);
         const filteredReviewers = reviewers.filter(
           (name) => !invalidReviewers.includes(name),
@@ -992,9 +1065,6 @@ export async function ensureCommentRemoval(
 
 // Pull Request
 
-const escapeHash = (input: string): string =>
-  input?.replace(regEx(/#/g), '%23');
-
 export async function createPr({
   sourceBranch,
   targetBranch,
@@ -1005,31 +1075,11 @@ export async function createPr({
   const description = sanitize(rawDescription);
   logger.debug(`createPr(${sourceBranch}, title=${title})`);
   const base = targetBranch;
-  let reviewers: BbsRestUserRef[] = [];
 
-  if (platformPrOptions?.bbUseDefaultReviewers) {
-    logger.debug(`fetching default reviewers`);
-    const { id } = (
-      await bitbucketServerHttp.getJsonUnchecked<{ id: number }>(
-        `./rest/api/1.0/projects/${config.projectKey}/repos/${config.repositorySlug}`,
-      )
-    ).body;
-
-    const defReviewers = (
-      await bitbucketServerHttp.getJsonUnchecked<{ name: string }[]>(
-        `./rest/default-reviewers/1.0/projects/${config.projectKey}/repos/${
-          config.repositorySlug
-        }/reviewers?sourceRefId=refs/heads/${escapeHash(
-          sourceBranch,
-        )}&targetRefId=refs/heads/${base}&sourceRepoId=${id}&targetRepoId=${id}`,
-      )
-    ).body;
-
-    reviewers = defReviewers.map((u) => ({
-      user: { name: u.name },
-    }));
-  }
-
+  // Note: reviewers are not included in the initial PR creation
+  // Instead, reviewers (including default reviewers) are added later via the addReviewers function
+  // This is different from the previous behavior where default reviewers were added during PR creation
+  // The bbUseDefaultReviewers config flag now works at the repository level instead of per PR
   const body: PartialDeep<BbsRestPr> = {
     title,
     description,
@@ -1039,7 +1089,7 @@ export async function createPr({
     toRef: {
       id: `refs/heads/${base}`,
     },
-    reviewers,
+    reviewers: [],
   };
   let prInfoRes: HttpResponse<BbsRestPr>;
   try {
